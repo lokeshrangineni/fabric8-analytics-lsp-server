@@ -375,17 +375,17 @@ connection.onCodeAction((params): CodeAction[] => {
     let codeActions: CodeAction[] = [];
     let hasAnalyticsDiagonostic: boolean = false;
     for (let diagnostic of params.context.diagnostics) {
-        let codeAction = codeActionsMap[diagnostic.range.start.line + '|' + diagnostic.range.start.character];
-        if (codeAction) {
+        let codeActionList = codeActionsMap[diagnostic.range.start.line + '|' + diagnostic.range.start.character];
+        for (let action of codeActionList) {
             
             if (path.basename(params.textDocument.uri) === 'pom.xml') {
-                codeAction.command = {
+                action.command = {
                 title: 'RedHat repository recommendation',
                 command: triggerRHRepositoryRecommendationNotification,
                 };   
             }
 
-            codeActions.push(codeAction);
+            codeActions.push(action);
 
         }
         if (!hasAnalyticsDiagonostic) {

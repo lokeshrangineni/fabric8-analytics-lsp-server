@@ -4,10 +4,10 @@
  * ------------------------------------------------------------------------------------------ */
 'use strict';
 import { IDependency } from './collector';
-import { get_range } from './utils';
+import { VERSION_TEMPLATE, get_range } from './utils';
 import { Vulnerability } from './vulnerability';
 import { VulnerabilityAggregator } from './aggregators';
-import { Diagnostic, CodeAction } from 'vscode-languageserver';
+import { Diagnostic, CodeAction, CodeActionKind } from 'vscode-languageserver';
 
 /* Descriptor describing what key-path to extract from the document */
 interface IBindingDescriptor {
@@ -76,6 +76,7 @@ class DiagnosticsPipeline implements IPipeline<Vulnerability>
             const aggVulnerability = this.vulnerabilityAggregator.aggregate(vulnerability);
             if (this.vulnerabilityAggregator.isNewVulnerability) {
                 const aggDiagnostic = aggVulnerability.getDiagnostic();
+                let codeActionList: CodeAction[] = [];
                 
                 // if (aggVulnerability.recommendation !== null && aggVulnerability.issuesCount === 0) {
                 //     let codeAction: CodeAction = {
@@ -113,6 +114,39 @@ class DiagnosticsPipeline implements IPipeline<Vulnerability>
                 //         codeActionsMap[aggDiagnostic.range.start.line + '|' + aggDiagnostic.range.start.character] = codeAction;
                 //     }
                 // }
+
+                let version = '1.0.0';
+                let codeAction: CodeAction = {
+                    title: `Switch to version ${version} for Snyk`,
+                    diagnostics: [aggDiagnostic],
+                    kind: CodeActionKind.QuickFix,
+                    edit: {
+                        changes: {
+                        }
+                    }
+                };
+                codeAction.edit.changes[this.uri] = [{
+                    range: aggDiagnostic.range,
+                    newText: vulnerability.replacement.replace(VERSION_TEMPLATE, version)
+                }];
+                codeActionList.push(codeAction);
+
+                let version2 = '2.0.0';
+                let codeAction2: CodeAction = {
+                    title: `Switch to version ${version2} for OCV`,
+                    diagnostics: [aggDiagnostic],
+                    kind: CodeActionKind.QuickFix,
+                    edit: {
+                        changes: {
+                        }
+                    }
+                };
+                codeAction2.edit.changes[this.uri] = [{
+                    range: aggDiagnostic.range,
+                    newText: vulnerability.replacement.replace(VERSION_TEMPLATE, version2)
+                }];
+                codeActionList.push(codeAction2);
+                codeActionsMap[aggDiagnostic.range.start.line + '|' + aggDiagnostic.range.start.character] = codeActionList;
 
                 if (aggDiagnostic) {
                     this.diagnostics.push(aggDiagnostic);
@@ -202,6 +236,6 @@ class SecurityEngine extends AnalysisConsumer implements DiagnosticProducer {
     }
 }
 
-let codeActionsMap = new Map<string, CodeAction>();
+let codeActionsMap = new Map<string, CodeAction[]>();
 
 export { DiagnosticsPipeline, SecurityEngine, codeActionsMap };
