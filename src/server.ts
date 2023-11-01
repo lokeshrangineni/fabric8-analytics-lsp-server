@@ -16,15 +16,11 @@ import { DependencyProvider as PackageJson } from './providers/package.json';
 import { DependencyProvider as PomXml } from './providers/pom.xml';
 import { DependencyProvider as GoMod } from './providers/go.mod';
 import { DependencyProvider as RequirementsTxt } from './providers/requirements.txt';
-import { DependencyMap, IDependencyProvider } from './collector';
-import { SecurityEngine, DiagnosticsPipeline, codeActionsMap } from './consumers';
-import { NoopVulnerabilityAggregator, MavenVulnerabilityAggregator } from './aggregators';
-import { ANALYTICS_SOURCE } from './vulnerability';
+import { RHDA_SOURCE } from './constants';
 import { config } from './config';
 import { TextDocumentSyncKind, Connection, DidChangeConfigurationNotification } from 'vscode-languageserver';
 import { TextDocument } from 'vscode-languageserver-textdocument';
-
-import exhort from '@RHEcosystemAppEng/exhort-javascript-api';
+import { performDiagnostics, codeActionsMap } from './diagnosticHandler';
 
 
 enum EventStream {
@@ -153,166 +149,20 @@ class AnalysisLSPServer implements IAnalysisLSPServer {
 const files: IAnalysisFiles = new AnalysisFiles();
 const server: IAnalysisLSPServer = new AnalysisLSPServer(connection, files);
 
-// total counts of known security vulnerabilities
-class VulnCount {
-    issuesCount: number = 0;
-}
-// Generate summary notification message for vulnerability analysis
-const getCAmsg = (deps, diagnostics, vulnCount): string => {
-    let msg = `Scanned ${deps.length} ${deps.length === 1 ? 'dependency' : 'dependencies'}, `;
-
-    if (diagnostics.length > 0) {
-        const c = vulnCount.issuesCount;
-        const vulStr = (count: number) => count === 1 ? 'Vulnerability' : 'Vulnerabilities';
-        msg = c > 0 ? `flagged ${c} Known Security ${vulStr(c)} along with quick fixes` : 'No potential security vulnerabilities found';
-    } else {
-        msg += 'No potential security vulnerabilities found';
-    }
-
-    return msg;
-};
-
-/* Runs DiagnosticPileline to consume dependencies and generate Diagnostic[] */
-function runPipeline(dependencies, diagnostics, packageAggregator, diagnosticFilePath, pkgMap: DependencyMap, vulnCount, provider: IDependencyProvider) {
-    dependencies.forEach(d => {
-        // match dependency with dependency from package map
-        const pkg = pkgMap.get(d.ref.split('@')[0].replace(`pkg:${provider.ecosystem}/`, ''));
-        // if dependency mached, run diagnostic
-        if (pkg !== undefined) {
-            const pipeline = new DiagnosticsPipeline(SecurityEngine, pkg, config, diagnostics, packageAggregator, diagnosticFilePath);
-            pipeline.run(d);
-            const secEng = pipeline.item as SecurityEngine;
-            vulnCount.issuesCount += secEng.issuesCount;
-        }
-    });
-    connection.sendDiagnostics({ uri: diagnosticFilePath, diagnostics: diagnostics });
-    connection.console.log(`sendDiagnostics: ${diagnostics?.length}`);
-}
-
-// Fetch Vulnerabilities by component analysis API call
-const fetchVulnerabilities = async (fileType: string, reqData: string) => {
-    
-    // set up configuration options for the component analysis request
-    const options = {
-        'RHDA_TOKEN': config.telemetryId,
-        'RHDA_SOURCE': config.utmSource,
-        'EXHORT_DEV_MODE': config.exhortDevMode,
-        'MATCH_MANIFEST_VERSIONS': globalSettings.matchManifestVersions,
-        'EXHORT_MVN_PATH': globalSettings.exhortMvnPath,
-        'EXHORT_NPM_PATH': globalSettings.exhortNpmPath,
-        'EXHORT_GO_PATH': globalSettings.exhortGoPath,
-        'EXHORT_PYTHON3_PATH': globalSettings.exhortPython3Path,
-        'EXHORT_PIP3_PATH': globalSettings.exhortPip3Path,
-        'EXHORT_PYTHON_PATH': globalSettings.exhortPythonPath,
-        'EXHORT_PIP_PATH': globalSettings.exhortPipPath
-    };
-    if (globalSettings.exhortSnykToken !== '') {
-        options['EXHORT_SNYK_TOKEN'] = globalSettings.exhortSnykToken;
-    }
-
-        // get component analysis in JSON format
-    const componentAnalysisJson = await exhort.componentAnalysis(fileType, reqData, options);
-
-    // check vulnerability provider statuses
-    const ko = [];
-    componentAnalysisJson.summary.providerStatuses.forEach(ps => {
-        if (!ps.ok) {
-            ko.push(ps.provider);
-        }
-    });
-    // issue warning if failed to fetch data from providers
-    if (ko.length !== 0) {
-        const errMsg = `The Component Analysis couldn't fetch data from the following providers: [${ko}]`;
-        connection.console.warn(errMsg);
-        connection.sendNotification('caSimpleWarning', errMsg);
-    }
-
-    return componentAnalysisJson;
-};
-
-const sendDiagnostics = async (diagnosticFilePath: string, contents: string, provider: IDependencyProvider) => {
-
-    // get dependencies from response before firing diagnostics.   
-    const getDepsAndRunPipeline = response => {
-        let deps = [];
-        if (response.dependencies && response.dependencies.length > 0) {
-            deps = response.dependencies;
-        }
-        runPipeline(deps, diagnostics, packageAggregator, diagnosticFilePath, pkgMap, vulnCount, provider);
-    };
-
-    // clear all diagnostics
-    connection.sendDiagnostics({ uri: diagnosticFilePath, diagnostics: [] });
-    connection.sendNotification('caNotification', {
-        data: 'Checking for security vulnerabilities ...',
-        done: false,
-        uri: diagnosticFilePath,
-    });
-
-    // collect dependencies from manifest
-    let deps = null;
-    try {
-        const start = new Date().getTime();
-        deps = await provider.collect(contents);
-        const end = new Date().getTime();
-        connection.console.log(`manifest parse took ${end - start} ms, found ${deps.length} deps`);
-    } catch (error) {
-        connection.console.warn(`Error: ${error}`);
-        connection.sendNotification('caError', {
-            data: error,
-            uri: diagnosticFilePath,
-        });
-        return;
-    }
-
-    // map dependencies
-    const pkgMap = new DependencyMap(deps);
-
-    // init aggregator
-    const packageAggregator = provider.ecosystem === 'maven' ? new MavenVulnerabilityAggregator(provider) : new NoopVulnerabilityAggregator(provider);
-
-    // init tracking components
-    const diagnostics = [];
-    const vulnCount = new VulnCount();
-    const start = new Date().getTime();
-        
-    // fetch vulnerabilities
-    const request = fetchVulnerabilities(path.basename(diagnosticFilePath), contents)
-    .then(getDepsAndRunPipeline)
-    .catch(error => {
-        const errMsg = `Component Analysis error. ${error}`;
-        connection.console.warn(errMsg);
-        connection.sendNotification('caSimpleWarning', errMsg);
-        return;
-    });
-    await request;
-
-    // report results
-    const end = new Date().getTime();
-    connection.console.log(`fetch vulns took ${end - start} ms`);
-    connection.sendNotification('caNotification', {
-        data: getCAmsg(deps, diagnostics, vulnCount),
-        done: true,
-        uri: diagnosticFilePath,
-        diagCount: diagnostics.length || 0,
-        vulnCount: vulnCount.issuesCount,
-    });
-};
-
 files.on(EventStream.Diagnostics, '^package\\.json$', (uri, name, contents) => {
-    sendDiagnostics(uri, contents, new PackageJson());
+    performDiagnostics(uri, contents, new PackageJson());
 });
 
 files.on(EventStream.Diagnostics, '^pom\\.xml$', (uri, name, contents) => {
-    sendDiagnostics(uri, contents, new PomXml());
+    performDiagnostics(uri, contents, new PomXml());
 });
 
 files.on(EventStream.Diagnostics, '^go\\.mod$', (uri, name, contents) => {
-    sendDiagnostics(uri, contents, new GoMod());
+    performDiagnostics(uri, contents, new GoMod());
 });
 
 files.on(EventStream.Diagnostics, '^requirements\\.txt$', (uri, name, contents) => {
-    sendDiagnostics(uri, contents, new RequirementsTxt());
+    performDiagnostics(uri, contents, new RequirementsTxt());
 });
 
 // TRIGGERS
@@ -382,10 +232,10 @@ const fullStackReportAction = (): CodeAction => ({
     }
 });
 
-
 connection.onCodeAction((params): CodeAction[] => {
     const codeActions: CodeAction[] = [];
-    let hasAnalyticsDiagonostic: boolean = false;
+    let hasRhdaDiagonostic: boolean = false;
+    
     for (const diagnostic of params.context.diagnostics) {
         const codeAction = codeActionsMap[diagnostic.range.start.line + '|' + diagnostic.range.start.character];
         if (codeAction) {
@@ -400,14 +250,16 @@ connection.onCodeAction((params): CodeAction[] => {
             codeActions.push(codeAction);
 
         }
-        if (!hasAnalyticsDiagonostic) {
-            hasAnalyticsDiagonostic = diagnostic.source === ANALYTICS_SOURCE;
+        if (!hasRhdaDiagonostic) {
+            hasRhdaDiagonostic = diagnostic.source === RHDA_SOURCE;
         }
     }
-    if (config.provideFullstackAction && hasAnalyticsDiagonostic) {
+    if (config.provideFullstackAction && hasRhdaDiagonostic) {
         codeActions.push(fullStackReportAction());
     }
     return codeActions;
 });
+
+export { globalSettings, connection }
 
 connection.listen();
