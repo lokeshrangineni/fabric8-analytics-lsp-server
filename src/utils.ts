@@ -46,3 +46,12 @@ export function isDefined(obj: any, ...keys: string[]): boolean {
   }
   return true;
 }
+
+/* Please note :: There was issue with semverRegex usage in the code. During run time, it extracts
+ * version with 'v' prefix, but this is not be behavior of semver in CLI and test environment.
+ * At the moment, using regex directly to extract version information without 'v' prefix. */
+//import semverRegex = require('semver-regex');
+export function semVerRegExp(str: string): RegExpExecArray {
+  const regExp = /(?<=^v?|\sv?)(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:0|[1-9]\d*|[\da-z-]*[a-z-][\da-z-]*)(?:\.(?:0|[1-9]\d*|[\da-z-]*[a-z-][\da-z-]*))*)?(?:\+[\da-z-]+(?:\.[\da-z-]+)*)?(?=$|\s)/ig;
+  return regExp.exec(str);
+}
